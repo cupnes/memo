@@ -1,0 +1,3 @@
+* メモリアロケータについて
+- メモリー管理の内側
+-- http://www.ibm.com/developerworks/jp/linux/library/l-memory/index.html

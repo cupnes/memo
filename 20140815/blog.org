@@ -1,0 +1,325 @@
+* ブログ記事の下書き
+* [Linux][strace]straceの実験(returnのみのプログラム)
+最近、straceコマンドを知ったので、簡単なプログラムで試してみます。
+
+
+straceは、「あるプログラムが発行するシステムコールの内容を表示してくれるコマンド」です。
+システムコールは正に、アプリケーションとOSのインタフェースなので、
+これを一覧で見せてくれるということは、OSから見たアプリケーションの振る舞いを把握することができます。
+
+
+** 対象のプログラム
+「まずは一番簡単なものを」ということで、
+以下の「returnのみのプログラム」で試してみました。
+<return.c>
+>|c|
+int main(void)
+{
+	return 0;
+}
+||<
+
+
+** 結果
+結果は下のとおりでした。
+>|sh|
+$ gcc -Wall -o return return.c
+$ strace ./return
+execve("./return", ["./return"], [/* 37 vars */]) = 0
+brk(0)                                  = 0x8c7d000
+access("/etc/ld.so.nohwcap", F_OK)      = -1 ENOENT (No such file or directory)
+mmap2(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xb7756000
+access("/etc/ld.so.preload", R_OK)      = -1 ENOENT (No such file or directory)
+open("/etc/ld.so.cache", O_RDONLY)      = 3
+fstat64(3, {st_mode=S_IFREG|0644, st_size=93113, ...}) = 0
+mmap2(NULL, 93113, PROT_READ, MAP_PRIVATE, 3, 0) = 0xb773f000
+close(3)                                = 0
+access("/etc/ld.so.nohwcap", F_OK)      = -1 ENOENT (No such file or directory)
+open("/lib/i386-linux-gnu/i686/cmov/libc.so.6", O_RDONLY) = 3
+read(3, "\177ELF\1\1\1\0\0\0\0\0\0\0\0\0\3\0\3\0\1\0\0\0\300o\1\0004\0\0\0"..., 512) = 512
+fstat64(3, {st_mode=S_IFREG|0755, st_size=1441960, ...}) = 0
+mmap2(NULL, 1456504, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_DENYWRITE, 3, 0) = 0xb75db000
+mprotect(0xb7738000, 4096, PROT_NONE)   = 0
+mmap2(0xb7739000, 12288, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3, 0x15d) = 0xb7739000
+mmap2(0xb773c000, 10616, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0xb773c000
+close(3)                                = 0
+mmap2(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xb75da000
+set_thread_area({entry_number:-1 -> 6, base_addr:0xb75da8d0, limit:1048575, seg_32bit:1, contents:0, read_exec_only:0, limit_in_pages:1, seg_not_present:0, useable:1}) = 0
+mprotect(0xb7739000, 8192, PROT_READ)   = 0
+mprotect(0xb7775000, 4096, PROT_READ)   = 0
+munmap(0xb773f000, 93113)               = 0
+exit_group(0)                           = ?
+||<
+
+
+====
+
+
+** 何をやっているのか
+実行結果は24行あり、何も出力しないアプリケーションなので、
+行数がそのままシステムコールを呼んだ回数で、24回システムコールを呼んでいることがわかります。
+
+
+システムコール自体馴染みの薄いものなので、「man 2」を使って一つ一つ見ていきたいと思います。
+
+
+*** execve("./return", ["./return"], [/* 37 vars */]) = 0
+- 第1引数で指定されたプログラム("./return")を実行する
+- 第2引数は引数文字列の配列
+-- これがこのままアプリ側のargvとなる
+- 第3引数は環境変数
+-- 文字列の配列
+-- 伝統的に「key=value」の形式
+-- アプリ側からは、main()の3番目の仮引数で「char *envp[]」とすると取り出せる
+
+
+- 成功するとexecveは返らない、エラーの場合は-1を返す
+-- 成功している様子
+
+
+*** brk(0) = 0x8c7d000
+- プログラム・ブレークの場所を変更
+-- プログラム・ブレークはプロセスのデータ・セグメントの末尾を示す
+-- 以上はman 2のコピペ<del>、よくわかってない。どゆこと？</del>
+--- 初期メモリ割り当ての最下アドレス(という認識で良いのか？)(参考より)
+
+
+- Linuxでは成功した場合の戻り値は「プログラムの新しいブレーク」
+-- <del>どゆこと？</del>
+
+
+**** 参考
+- [http://www.ibm.com/developerworks/jp/linux/library/l-memory/index.html:title]
+
+
+*** access("/etc/ld.so.nohwcap", F_OK) = -1 ENOENT (No such file or directory)
+- /etc/ld.so.nohwcapについて、ファイルが存在しているかチェック(F_OK)
+- 無いので-1を返して、errnoにファイルが存在しない旨をセット
+
+
+*** mmap2(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xb7756000
+- mmap2()は、glibcのラッパー関数mmap()から呼び出される
+-- インタフェースはmmap()と同じ
+--- ただし、第6引数にはmmap()ではバイト単位だが、mmap2()では4096バイトを単位として指定する
+
+
+- 第1引数は、新しいマッピングの開始アドレス
+-- NULLが指定されるとカーネルがマッピング開始アドレスを選択する
+-- NULLでなければ、カーネルはヒントとして使用する
+- 第2引数は、マッピングの長さ(バイト)
+- 第3引数は、マッピングのメモリ保護設定
+-- PROT_READ: 読み込み可能
+-- PROT_WRITE: 書き込み可能
+- 第4引数は、マッピングに対する変更が同じファイルをマッピングしているプロセスに見えるかどうかの設定
+-- MAP_PRIVATE: 他のプロセスへは見えない
+-- MAP_ANONYMOUS: マッピングはどのファイルとも関連付けされない
+- 第5引数と第6引数は、マッピングされた領域の初期値に関する設定
+-- 第5引数はファイルディスクリプタで、第6引数はオフセット
+-- 第5引数で指定されたファイルの、第6引数のオフセットからファイルマッピングが開始される
+-- 今回はファイルディスクリプタが-1なので、ファイルにはマッピングされず、領域は0で初期化される
+
+
+- 返り値はマッピングされた領域へのポインタ
+
+
+- ちゃんと調べてみると、mmapはファイルをメモリへマップするためのシステムコールであって、
+   領域確保はその中の特別な振る舞いなのだとわかる
+
+
+- まとめると、アプリケーションがカーネルへ8192バイトの領域確保をお願い
+-- カーネルは、アプリケーションから見て0xb7756000から使える領域を確保
+-- [0xb7756000, 0xb7758000)を確保
+
+
+**** 参考
+- [http://d.hatena.ne.jp/yarb/20091205/p1:title]
+
+
+*** access("/etc/ld.so.preload", R_OK) = -1 ENOENT (No such file or directory)
+- /etc/ld.so.preload が「ファイルが存在して、かつ、読み込み可」であるかをチェック
+-- そして、カーネルから「ファイルが存在しないよ」と言われている
+
+
+*** open("/etc/ld.so.cache", O_RDONLY) = 3
+- /etc/ld.so.cache を読み込み専用で開いている
+-- ファイルディスクリプタ3番で取得
+
+
+*** fstat64(3, {st_mode=S_IFREG|0644, st_size=93113, ...}) = 0
+- ファイルの状態を返す
+- ファイルは第1引数にファイルディスクリプタで指定
+-- 先ほど開いた/etc/ld.so.cacheを指定している
+- 第2引数でファイルの状態を表すstat構造体の先頭アドレスを返す
+-- 2つ以降はstraceの出力では省略
+--- st_mode: アクセス保護
+---- S_IFREG: 通常のファイル
+---- 0644は保護モード(？)
+--- st_size: ファイルの大きさ(バイト)
+---- 93113バイト
+
+
+- 戻り値は成功した場合に0
+-- 成功している
+
+
+*** mmap2(NULL, 93113, PROT_READ, MAP_PRIVATE, 3, 0) = 0xb773f000
+- /etc/ld.so.cache(ファイルディスクリプタ3番)をマッピング
+-- マッピングの長さとして、fstat64()で取得した「ファイルの大きさ(93113バイト)」を使用
+
+
+- マッピングに成功し、ポインタ0xb773f000を返している
+-- [0xb773f000, 0xb7755bb9)の領域をマッピング
+
+
+*** close(3) = 0
+- /etc/ld.so.cache(ファイルディスクリプタ3番)を閉じている
+
+
+- 成功して、0を返している
+
+
+*** access("/etc/ld.so.nohwcap", F_OK) = -1 ENOENT (No such file or directory)
+- /etc/ld.so.nohwcapが存在するかチェック
+
+
+- 存在しない
+
+
+*** open("/lib/i386-linux-gnu/i686/cmov/libc.so.6", O_RDONLY) = 3
+- /lib/i386-linux-gnu/i686/cmov/libc.so.6を読み込み専用で開く
+
+
+- ファイルディスクリプタ3番
+-- /etc/ld.so.cacheを閉じたので、同じ3番を使いまわしている
+
+
+*** read(3, "\177ELF\1\1\1\0\0\0\0\0\0\0\0\0\3\0\3\0\1\0\0\0\300o\1\0004\0\0\0"..., 512) = 512
+- /lib/i386-linux-gnu/i686/cmov/libc.so.6を512バイト読み込む
+-- 第2引数には読み込む際のバッファの先頭アドレスを指定
+--- strace上では中身が表示されている
+
+
+- 成功したので読み込んだバイト数(512)を返す
+
+
+*** fstat64(3, {st_mode=S_IFREG|0755, st_size=1441960, ...}) = 0
+- /lib/i386-linux-gnu/i686/cmov/libc.so.6の状態を取得
+-- 通常ファイルで保護モードは0x0755
+-- ファイルサイズは1441960バイト
+
+
+- 成功し、0を返す
+
+
+*** mmap2(NULL, 1456504, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_DENYWRITE, 3, 0) = 0xb75db000
+- /lib/i386-linux-gnu/i686/cmov/libc.so.6をマッピング
+-- 第6引数のオフセットが0なので、/lib/i386-linux-gnu/i686/cmov/libc.so.6の先頭からマッピング
+-- 第2引数の「長さ」が1456504
+--- fstat64()で「ファイルサイズは1441960バイト」と取得したのに、なぜ？
+---- マッピングの方がファイルよりも14544バイト長い
+
+
+- 成功したので、ポインタ0xb75db000を返す
+-- [0xb75db000, 0xb773e978)の領域をマッピング
+
+
+*** mprotect(0xb7738000, 4096, PROT_NONE) = 0
+- メモリ領域の保護を設定
+- [0xb7738000, 0xb7739000(=0xb7738000 + 4096 - 1)]の領域を全くアクセスできない(PROT_NONE)ように設定
+-- /lib/i386-linux-gnu/i686/cmov/libc.so.6をマッピングした領域の中で一部の領域へはアクセスできないようにしている
+
+
+- 成功し、0を返す
+
+
+*** mmap2(0xb7739000, 12288, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3, 0x15d) = 0xb7739000
+- 0xb7739000から12288をマッピング
+-- マッピングの開始アドレス(0xb7739000)は、mprotect()でアクセス不可に設定した領域の直後
+-- マッピングするファイルは/lib/i386-linux-gnu/i686/cmov/libc.so.6で、オフセット349(0x15d)バイト
+-- メモリ保護は、読み込み可能(PROT_READ)、かつ書き込み可能(PROT_WRITE)
+-- 他プロセスに対して、見えない(MAP_PRIVATE)
+-- 第1引数の0xb7739000は「ヒント」ではなく、直接指定(MAP_FIXED)
+-- MAP_DENYWRITEのフラグは現在は無視
+--- 元々は、マップ元のファイルへ書き込みを行おうとするとエラーで失敗するようシグナルが設定されていた
+---- denial-of-service(サービス拒否)攻撃の原因となった
+
+
+- 成功し、ポインタ0xb7739000を返す
+
+
+*** mmap2(0xb773c000, 10616, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0xb773c000
+- 0xb773c000から10616バイトをマッピング
+-- マッピングするファイルは無しなので、領域はゼロクリア
+-- [0xb773c000, 0xb773e978)は/lib/i386-linux-gnu/i686/cmov/libc.so.6をマッピングした末尾10616バイトの領域
+-- メモリ保護やその他フラグは0xb7739000と同様
+
+
+- 成功し、ポインタ0xb773c000を返す
+
+
+*** close(3) = 0
+- /lib/i386-linux-gnu/i686/cmov/libc.so.6を閉じる
+
+
+- 成功し、0を返す
+
+
+*** mmap2(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xb75da000
+- 4096バイトの領域を確保
+- メモリ保護は、読み書き可能
+- 他プロセスから見えない
+- マッピングした領域はゼロクリア
+
+
+- 成功し、ポインタ0xb75da000を返す
+
+
+*** set_thread_area({entry_number:-1 -> 6, base_addr:0xb75da8d0, limit:1048575, seg_32bit:1, contents:0, read_exec_only:0, limit_in_pages:1, seg_not_present:0, useable:1}) = 0
+- スレッド局所記憶(TLS)領域を設定
+-- entry_numberは-1を渡すと、set_thread_area()が未使用のTLSエントリを探し、適切なentry_numberを設定してくれる
+--- この場合は「6」
+-- その他のメンバについては要調査
+--- man 2 set_thread_areaには載っていなかった
+
+
+- 成功し、0を返す
+
+
+*** mprotect(0xb7739000, 8192, PROT_READ) = 0
+- 0xb7739000から8192バイトを読み込み専用でメモリ保護
+-- /lib/i386-linux-gnu/i686/cmov/libc.so.6のオフセット349バイトをマッピングした領域
+
+
+- 成功し、0を返す
+
+
+*** mprotect(0xb7775000, 4096, PROT_READ) = 0
+- 0xb7775000から4096バイトを読み込み専用でメモリ保護
+
+
+- 成功し、0を返す
+
+
+*** munmap(0xb773f000, 93113) = 0
+- 0xb773f000から93113バイトのマッピングを消去する
+-- /etc/ld.so.cacheをマッピングしていた領域
+
+
+- 成功し、0を返す
+
+
+*** exit_group(0) = ?
+- プロセス中のすべてのスレッドをexitさせる
+-- 第1引数はstatus
+
+
+- 戻り値は無し
+-- 値を返さない
+
+
+** 所感
+- straceをまずは簡単なもので試してみたところで、併せて登場したシステムコールコールをman 2で調べてみた
+- アプリケーションとOSのやり取りの流れは見えてきた
+-- 今回は何も処理をしないアプリケーションだったので、ダイナミックリンクのライブラリのマッピングが多く見えていた
+- しかし、そのようにやり取りをする「意図」はソースコードか、あるいは大本の仕組みを理解しないとわからない
+-- 今回であれば、スタートアップルーチンだろうか

@@ -28,6 +28,16 @@
 ---- デバッグ用の仮のルートファイルシステムはどう用意すれば良いか？
 -- 3. GDBの設定
 
+- その他のデバッグ手法
+-- Linux のデバッグ手法をマスターする
+--- http://www.ibm.com/developerworks/jp/linux/library/l-debug/
+--- strace
+--- gdb
+--- kgdb
+--- Oops分析
+--- kdb
+--- magic key sequence
+
 **** 参考
 - QEMU上のLinuxカーネルをGDBでデバッグする - Narrow Escape
 -- http://hiroom2.jimdo.com/2014/01/15/qemu%E4%B8%8A%E3%81%AElinux%E3%82%AB%E3%83%BC%E3%83%8D%E3%83%AB%E3%82%92gdb%E3%81%A7%E3%83%87%E3%83%90%E3%83%83%E3%82%B0%E3%81%99%E3%82%8B/
@@ -36,6 +46,11 @@
 **** Gitとかを使って時系列で見る
 - コミットログを追えるように
 -- LinusのTreeをcloneしておく
+
+***** 参考
+- Linuxカーネルのソースツリーについて
+-- Linuxカーネルをコンパイルする | コンピュータ忘備録
+--- http://c0lvlput3r.blogspot.jp/2013/05/compiling-linux-kernel-on-ubuntu.html
 
 **** タグジャンプを使ってトップダウンやボトムアップで読む
 - 静的デバッグがすぐ行えるように
