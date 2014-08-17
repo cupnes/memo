@@ -45,7 +45,6 @@
 *** その他に
 **** Gitとかを使って時系列で見る
 - コミットログを追えるように
--- LinusのTreeをcloneしておく
 
 ***** 参考
 - Linuxカーネルのソースツリーについて
@@ -60,3 +59,56 @@
 ***** 参考
 - Emacs - GNU Global のタグファイル自動更新 - Qiita
 -- http://qiita.com/hayamiz/items/8e8c7fca64b4810d8e78
+
+*** カーネルビルドサーバ
+- 以下の2つをやったらビルドしてくれる
+-- ソースの場所を指定
+--- GitリポジトリのURL
+--- tarアーカイブ圧縮ファイルのURL
+-- .configを渡す
+--- olddefconfigしてビルドしてくれる
+** オリジナルのメモリアロケータ(malloc)実装
+*** 考えてること
+- どれだけのメモリサイズを貸したかだけ覚えている
+- 誰(どのプロセス)に貸したかは覚えていない
+
+- 「貸出中(rented)」と「返却済み(available)」のメモリプールは構造体「struct mem_control_block」のリンクリストで管理
+-- struct mem_control_blockのメンバ
+--- unsigned int size
+---- サイズ[バイト]
+----- mem_control_blockを含まない、データ領域のサイズ
+--- struct mem_control_block *next
+---- 次の要素へのポインタ
+----- 次の要素のmem_control_blockの先頭アドレス
+---- 指すべき要素が無ければNULL
+
+- インタフェース
+-- void *malloc(size_t size)
+--- 引数sizeが連続領域で入るブロックがavailableのリストにあるかチェック
+---- [あれば]
+----- 見つけたブロックのサイズ > 引数size であれば、見つけたブロックを分割
+----- 貸し出すブロックをavailableからrentedへ移動
+----- 貸し出すブロックのデータ領域先頭アドレスを返す
+---- [無ければ]
+----- (sizeof(struct mem_control_block) + size)バイトの領域を確保
+------ まずは、sbrk()で
+------ brk()、mmap()、mmap2()でも可能か
+----- 新たに確保した領域のmem_control_blockを初期化
+------ size: 引数size
+------ next: NULL
+----- rentedの最後に新たに確保したブロックを追加
+-- void free(void *ptr)
+--- (ptr - sizeof(struct mem_control_block))と開始アドレスが一致するブロックをrentedから検索
+---- next要素と比較していき、一致したnext要素を持つブロックが指している先のブロックが該当ブロック
+--- 見つけたブロックをavailableへ移動
+---- アドレス順に並ぶように追加する
+---- 隣接ブロックであれば統合する
+----- 隣接ブロックであるかどうかは以下で調べられる
+#+BEGIN_SRC c -n
+/* mcbはstruct mem_control_block */
+if ((unsigned char *)mcb.next == (unsigned char *)&mcb + sizeof(struct mem_control_block) + mcb.size) {
+	/* 隣接している */
+} else {
+	/* 隣接していない */
+}
+#+END_SRC
