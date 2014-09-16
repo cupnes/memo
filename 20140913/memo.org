@@ -1,0 +1,610 @@
+* linux-0.01-rm の移植
+** Kernel panic: Unexpected HD interrupt
+出させているのは
+kernel/hd.c(235): void unexpected_hd_interrupt(void)
+
+これを呼んでいるのは
+kernel/system_call.s(218): 	movl $unexpected_hd_interrupt,%eax
+のみ
+
+system_call.sで218行目が実行されるのは、
+217行目の
+#+BEGIN_EXAMPLE
+	jne 1f
+#+END_EXAMPLE
+(ZF == 0のときshortジャンプ)
+が実行されなかったから
+したがって、ZF == 1
+
+ということは、
+216行目の
+#+BEGIN_EXAMPLE
+	testl %eax,%eax
+#+END_EXAMPLE
+は、
+| %eaxの値 | ZF |
+|----------+----|
+| 0        |  1 | <= こっち
+| 0以外    |  0 |
+なので、%eaxの値は0
+
+ということは、
+215行目の
+#+BEGIN_EXAMPLE
+	movl do_hd,%eax
+#+END_EXAMPLE
+(do_hd -> %eax)
+のとき、do_hdは0
+
+*** do_hdを0にしている原因はどこか？
+grepするとdo_hdは、
+#+BEGIN_EXAMPLE
+/kernel/hd.c:156:void (*do_hd)(void) = NULL;
+#+END_EXAMPLE
+で定義されており、
+do_hdへ代入している箇所は
+#+BEGIN_EXAMPLE
+/kernel/hd.c:187:	do_hd = intr_addr;
+/kernel/hd.c:307:		do_hd=NULL;
+#+END_EXAMPLE
+の2箇所のみ。
+
+/kernel/hd.cを見てみると、
+156行目の定義はグローバル変数。
+#+BEGIN_EXAMPLE
+/*
+ * This is the pointer to a routine to be executed at every hd-interrupt.
+ * Interesting way of doing things, but should be rather practical.
+ */
+void (*do_hd)(void) = NULL;
+#+END_EXAMPLE
+併記のコメントは、意訳すると
+#+BEGIN_EXAMPLE
+これはhd割り込み毎に実行されるルーチンへのポインタ
+面白いやり方、だがかなり実践的(?)
+#+END_EXAMPLE
+
+また、187行目と307行目の代入箇所は、
+それぞれ以下の関数の中
+| 行番号 | 関数名     | 実行条件                         |
+|--------+------------+----------------------------------|
+|    187 | hd_out     | なし(関数に入れば必ず実行される) |
+|    307 | do_request | グローバル変数this_request == 0  |
+
+do_request()の
+#+BEGIN_SRC C
+	if (!this_request) {
+		do_hd=NULL;
+		return;
+	}
+#+END_SRC
+の箇所は、アセンブラで
+#+BEGIN_SRC as
+    8a27:       a1 48 6c 01 00          mov    0x16c48,%eax
+    8a2c:       85 c0                   test   %eax,%eax
+    8a2e:       75 0b                   jne    8a3b <do_request+0x21>
+    8a30:       c7 05 40 67 01 00 00    movl   $0x0,0x16740
+    8a37:       00 00 00 
+    8a3a:       c3                      ret
+#+END_SRC
+なので、NULL == 0
+
+なので、do_request()はdo_hdを0にしている容疑者の一人
+
+あと、do_hdはNULLで初期化されているので、
+「初期化されてから1度も値を代入されていない」
+も、容疑者の一人
+
+あと、hd_out()は一番最後の引数「void (*intr_addr)(void)」を
+do_hdへ代入しているので、呼ばれ方によっては容疑者に成りうる。
+
+M-r(global -r)で探すと以下の3つ
+#+BEGIN_EXAMPLE
+hd_out            232 kernel/hd.c      	hd_out(nr,_SECT,_SECT,_HEAD-1,_CYL,WIN_SPECIFY,&do_request);
+hd_out            311 kernel/hd.c      		hd_out(this_request->hd,this_request->nsector,this_request->
+hd_out            323 kernel/hd.c      		hd_out(this_request->hd,this_request->nsector,this_request->
+#+END_EXAMPLE
+global -gやgrepで探してもコレ以上はヒットしない
+(アセンブリコードで呼ばれたりはしていない)
+
+見てみると、これら3つはどれも実際に存在する関数のポインタを渡しているので、
+仮引数intr_addrは0にはならない
+
+とは思うが、一応アセンブラを見てみよう
+
+まずは一つ目の
+232 kernel/hd.c      	hd_out(nr,_SECT,_SECT,_HEAD-1,_CYL,WIN_SPECIFY,&do_request);
+
+アセンブラをojbdumpとかで見るときは、リンクも済んでいる
+tools/system
+を見る。
+
+そもそも、hd_out()は呼ばれた時にどのように引数を受け取っているのか？
+それを調べないと、呼んでいる側のどのような代入処理がhd_out()内のdo_hdへの代入に
+対応するかがわからない。
+
+#+BEGIN_SRC sh
+$ objdump -x tools/system | grep do_hd
+00016740 g     O .bss   00000004 do_hd
+#+END_SRC
+do_hdのアドレスは0x00016740
+
+hd_out()の中で最初の0x16740への書き込みを探すと
+#+BEGIN_SRC as
+    88ac:       8b 44 24 3c             mov    0x3c(%esp),%eax
+    88b0:       a3 40 67 01 00          mov    %eax,0x16740
+#+END_SRC
+スタックに積まれている値(intr_addr)を、%eaxへ書き込み、
+%eaxの値を0x16740(do_hd)へ書き込んでいる
+
+関数先頭
+0000886c <hd_out>:
+からのスタックポインタ(%esp)の動きを見てみる
+
+hd_out()先頭からdo_hdへの代入までの全貌は以下のとおり
+#+BEGIN_SRC as
+0000886c <hd_out>:
+    886c:       55                      push   %ebp
+    886d:       57                      push   %edi
+    886e:       56                      push   %esi
+    886f:       53                      push   %ebx
+    8870:       83 ec 1c                sub    $0x1c,%esp
+    8873:       89 c6                   mov    %eax,%esi
+    8875:       89 d7                   mov    %edx,%edi
+    8877:       89 cd                   mov    %ecx,%ebp
+    8879:       8b 5c 24 30             mov    0x30(%esp),%ebx
+    887d:       83 fb 0f                cmp    $0xf,%ebx
+    8880:       77 05                   ja     8887 <hd_out+0x1b>
+    8882:       83 f8 01                cmp    $0x1,%eax
+    8885:       76 0c                   jbe    8893 <hd_out+0x27>
+    8887:       c7 04 24 c8 f5 00 00    movl   $0xf5c8,(%esp)
+    888e:       e8 05 dc ff ff          call   6498 <panic>
+    8893:       b9 e7 03 00 00          mov    $0x3e7,%ecx
+    8898:       ba f7 01 00 00          mov    $0x1f7,%edx
+    889d:       eb 05                   jmp    88a4 <hd_out+0x38>
+    889f:       83 e9 01                sub    $0x1,%ecx
+    88a2:       74 6e                   je     8912 <hd_out+0xa6>
+    88a4:       ec                      in     (%dx),%al
+    88a5:       83 e0 c0                and    $0xffffffc0,%eax
+    88a8:       3c 40                   cmp    $0x40,%al
+    88aa:       75 f3                   jne    889f <hd_out+0x33>
+    88ac:       8b 44 24 3c             mov    0x3c(%esp),%eax
+    88b0:       a3 40 67 01 00          mov    %eax,0x16740
+#+END_SRC
+
+まず、
+#+BEGIN_SRC as
+    886c:       55                      push   %ebp
+    886d:       57                      push   %edi
+    886e:       56                      push   %esi
+    886f:       53                      push   %ebx
+#+END_SRC
+では、
+
+・・・という方針はおいておいて。
+
+
+
+#+BEGIN_EXAMPLE
+hd_out            232 kernel/hd.c      	hd_out(nr,_SECT,_SECT,_HEAD-1,_CYL,WIN_SPECIFY,&do_request);
+hd_out            311 kernel/hd.c      		hd_out(this_request->hd,this_request->nsector,this_request->
+hd_out            323 kernel/hd.c      		hd_out(this_request->hd,this_request->nsector,this_request->
+#+END_EXAMPLE
+に登場する3つの関数のポインタが0ではないことを示して、
+hd_out()の疑いを晴らそう
+
+まずは、hd.cの232行目
+> hd_out(nr,_SECT,_SECT,_HEAD-1,_CYL,WIN_SPECIFY,&do_request);
+do_requestは
+objdump -x tools/system | grep do_request
+で調べると、
+#+BEGIN_EXAMPLE
+yarakawa@dyna:~/git/linux-0.01-rm-3.5$ objdump -x tools/system | grep do_request
+00008a1a l     F .text  00000105 do_request
+#+END_EXAMPLE
+より、
+0x00008a1a
+なので、do_hdを0にすることはない。
+
+次は311行目
+#+BEGIN_EXAMPLE
+		hd_out(this_request->hd,this_request->nsector,this_request->
+			sector,this_request->head,this_request->cyl,
+			this_request->cmd,&write_intr);
+#+END_EXAMPLE
+#+BEGIN_EXAMPLE
+yarakawa@dyna:~/git/linux-0.01-rm-3.5$ objdump -x tools/system | grep write_intr
+00008df5 l     F .text  000000b4 write_intr
+#+END_EXAMPLE
+これもdo_hdを0にすることはない
+
+最後に323行目
+#+BEGIN_EXAMPLE
+		hd_out(this_request->hd,this_request->nsector,this_request->
+			sector,this_request->head,this_request->cyl,
+			this_request->cmd,&read_intr);
+#+END_EXAMPLE
+#+BEGIN_EXAMPLE
+yarakawa@dyna:~/git/linux-0.01-rm-3.5$ objdump -x tools/system | grep read_intr
+00008d2c l     F .text  000000c9 read_intr
+#+END_EXAMPLE
+同じく
+
+以上より、hd_out()がdo_hdを0にすることはない。
+
+
+
+
+したがって、容疑者は以下の2名
+A. void (*do_hd)(void) = NULL;
+B. static void do_request(void)
+
+*** do_hd -> %eaxが実行されるのは何時か？
+どのタイミングで(あるいは何が起きたら)
+kernel/system_call.s(215): movl do_hd,%eax
+が実行されるのか？
+- これが実行されるときにdo_hd==0ならば、
+  あとは無条件に Kernel panic: Unexpected HD interrupt まで行き着く
+
+kernel/system_call.s(215): movl do_hd,%eax
+は、
+hd_interrupt:
+の中
+
+hd_interruptを呼んでいるのは
+#+BEGIN_EXAMPLE
+hd_interrupt      418 kernel/hd.c       set_trap_gate(0x2E,&hd_interrupt);
+#+END_EXAMPLE
+だけ。
+というより、set_trap_gateにhd_interruptのポインタを渡している
+
+これをやっているのは、
+hd_init()の中
+
+また、set_trap_gateは、
+include/asm/system.hの36-37行目で以下のようにマクロ定義されている
+#+BEGIN_EXAMPLE
+#define set_trap_gate(n,addr) \
+	_set_gate(&idt[n],15,0,addr)
+#+END_EXAMPLE
+
+だから、
+set_trap_gate(0x2E,&hd_interrupt);
+は、
+_set_gate(&idt[0x2E],15,0,&hd_interrupt);
+と展開される
+
+そして、_set_gate()は、
+同じファイルの22-31行目で以下のようにマクロ定義されている
+#+BEGIN_EXAMPLE
+#define _set_gate(gate_addr,type,dpl,addr) \
+__asm__ ("movw %%dx,%%ax\n\t" \
+	"movw %0,%%dx\n\t" \
+	"movl %%eax,%1\n\t" \
+	"movl %%edx,%2" \
+	: \
+	: "i" ((short) (0x8000+(dpl<<13)+(type<<8))), \
+	"o" (*((char *) (gate_addr))), \
+	"o" (*(4+(char *) (gate_addr))), \
+	"d" ((char *) (addr)),"a" (0x00080000))
+#+END_EXAMPLE
+
+なので、
+__asm__ ("movw %%dx,%%ax\n\t" \
+	"movw %0,%%dx\n\t" \
+	"movl %%eax,%1\n\t" \
+	"movl %%edx,%2" \
+	: \
+	: "i" ((short) (0x8000+(0<<13)+(15<<8))), \
+	"o" (*((char *) (&idt[0x2E]))), \
+	"o" (*(4+(char *) (&idt[0x2E]))), \
+	"d" ((char *) (&hd_interrupt)),"a" (0x00080000))
+と展開される
+
+すなわち、hd_init()の中のset_trap_gate()は、
+上記のインラインアセンブラで展開される。
+
+hd_interruptはobjdump -x tools/system | grep hd_interruptすると得られる
+000059b4 g       .text  00000000 hd_interrupt
+から、アドレスは
+0x000059b4
+であるとわかる
+
+objdump -d tools/systemでhd_init:を探し、このアドレスが登場する箇所を探すと
+#+BEGIN_SRC as
+00009066 <hd_init>:
+    9066:       b8 c0 67 01 00          mov    $0x167c0,%eax
+    906b:       ba 40 6c 01 00          mov    $0x16c40,%edx
+    9070:       c7 00 ff ff ff ff       movl   $0xffffffff,(%eax)
+    9076:       c7 40 20 00 00 00 00    movl   $0x0,0x20(%eax)
+    907d:       83 c0 24                add    $0x24,%eax
+    9080:       39 d0                   cmp    %edx,%eax
+    9082:       75 ec                   jne    9070 <hd_init+0xa>
+    9084:       c7 05 60 67 01 00 00    movl   $0x0,0x16760
+    908b:       00 00 00 
+    908e:       c7 05 64 67 01 00 00    movl   $0x14000,0x16764
+    9095:       40 01 00 
+    9098:       b8 00 00 08 00          mov    $0x80000,%eax
+    909d:       ba b4 59 00 00          mov    $0x59b4,%edx
+    90a2:       66 89 d0                mov    %dx,%ax
+    90a5:       66 ba 00 8f             mov    $0x8f00,%dx
+    90a9:       a3 e8 41 00 00          mov    %eax,0x41e8
+    90ae:       89 15 ec 41 00 00       mov    %edx,0x41ec
+    90b4:       ba 21 00 00 00          mov    $0x21,%edx
+    90b9:       ec                      in     (%dx),%al
+    90ba:       eb 00                   jmp    90bc <hd_init+0x56>
+    90bc:       eb 00                   jmp    90be <hd_init+0x58>
+    90be:       25 fb 00 00 00          and    $0xfb,%eax
+    90c3:       ee                      out    %al,(%dx)
+    90c4:       eb 00                   jmp    90c6 <hd_init+0x60>
+    90c6:       eb 00                   jmp    90c8 <hd_init+0x62>
+    90c8:       b2 a1                   mov    $0xa1,%dl
+    90ca:       ec                      in     (%dx),%al
+    90cb:       eb 00                   jmp    90cd <hd_init+0x67>
+    90cd:       eb 00                   jmp    90cf <hd_init+0x69>
+    90cf:       25 bf 00 00 00          and    $0xbf,%eax
+    90d4:       ee                      out    %al,(%dx)
+    90d5:       c3                      ret    
+    90d6:       90                      nop
+    90d7:       90                      nop
+#+END_SRC
+どこがインラインアセンブラの箇所に対応するんだ？
+
+範囲は以下のところで、
+#+BEGIN_EXAMPLE
+    9098:       b8 00 00 08 00          mov    $0x80000,%eax  => eax: 0x0008 0000, edx: 0xXXXX XXXX
+    909d:       ba b4 59 00 00          mov    $0x59b4,%edx   => eax: 0x0008 0000, edx: 0x0000 59b4
+    90a2:       66 89 d0                mov    %dx,%ax        => eax: 0x0008 59b4, edx: 0x0000 59b4
+    90a5:       66 ba 00 8f             mov    $0x8f00,%dx    => eax: 0x0008 59b4, edx: 0x0000 8f00
+    90a9:       a3 e8 41 00 00          mov    %eax,0x41e8    => eax: 0x0008 59b4, edx: 0x0000 8f00
+    90ae:       89 15 ec 41 00 00       mov    %edx,0x41ec    => eax: 0x0008 59b4, edx: 0x0000 8f00
+#+END_EXAMPLE
+#+BEGIN_EXAMPLE
+__asm__ ("movw %%dx,%%ax\n\t" \               ==> 90a2: mov    %dx,%ax
+	"movw %0,%%dx\n\t" \                      ==> 90a5: mov    $0x8f00,%dx
+	"movl %%eax,%1\n\t" \                     ==> 90a9: mov    %eax,0x41e8
+	"movl %%edx,%2" \                         ==> 90ae: mov    %edx,0x41ec
+	: \
+	: "i" ((short) (0x8f00)), \               ==> %0 (即値)
+	"o" (*((char *) (&idt[0x2E]))), \         ==> %1 (アドレスへの書き込み？)
+	"o" (*(4+(char *) (&idt[0x2E]))), \       ==> %2 (アドレスへの書き込み？)
+	"d" ((char *) (0x59b4)), # &hd_interrupt  ==> 909d: mov    $0x59b4,%edx
+	"a" (0x00080000)                          ==> 9098: mov    $0x80000,%eax
+	)
+#+END_EXAMPLE
+このように対応しているのではないか
+
+勉強したとこ:
+GCC拡張インラインアセンブラ構文 - kikairoyaの日記
+http://d.hatena.ne.jp/kikairoya/20100220/1266668559
+
+
+idtは、global -gx idt すると、
+#+BEGIN_EXAMPLE
+idt                10 boot/head.s      .globl idt,gdt,pg_dir,startup_32
+idt                 9 include/linux/head.h extern desc_table idt,gdt;
+#+END_EXAMPLE
+ここらへんが関連ありそう
+
+idtの実体は boot/head.s の170行目で
+#+BEGIN_EXAMPLE
+idt:	.fill 256,8,0		# idt is uninitialized
+#+END_EXAMPLE
+のように領域が確保されている
+
+Cのレベルではこの領域を
+desc_table
+という構造体として扱っている
+
+include/linux/head.h の中を抜粋すると
+#+BEGIN_EXAMPLE
+typedef struct desc_struct {
+	unsigned long a,b;
+} desc_table[256];
+extern desc_table idt,gdt;
+#+END_EXAMPLE
+32ビット変数2つの組みになっている
+
+
+
+まとめると、
+set_trap_gate(0x2E,&hd_interrupt);
+で、hd_interruptに関して行なっていることは
+idt[0x2e].a = (unsigned long)(0x80000 + &hd_interrupt)
+といったところか
+
+
+idtについて知らねば。
+&(idt[0x2e].a) : 0x41e8
+このアドレスに関数ポインタを書き込むことにどのような意味があるのかを知らねば。
+(おそらく、割り込みハンドラを設定しているのだと思うが)
+
+アーキテクチャ・ソフトウェア・デベロッパーズ・マニュアル 下巻:システム・プログラミング・ガイド
+(Vol.3)
+の
+5.10. 割り込みディスクリプタ・テーブル(IDT: Interrupt Descriptor Table)
+P.175-
+になにやら書いてある。
+
+yarakawa@dyna:~/git/linux-0.01-rm-3.5$ echo 'ibase=16;2E' | bc
+46
+
+割り込み46は、
+割り込み 32 ~ 255 -ユーザ定義の割り込み
+P.226
+に該当するのか？
+
+
+*** do_hdに0でない値は書かれているのか
+NULLで初期化されてから、do_hdには0以外の値は1度でも書かれているのか
+
+hd.c内の、
+- do_request()
+- hd_out3箇所
+#+BEGIN_EXAMPLE
+hd_out            232 kernel/hd.c      	hd_out(nr,_SECT,_SECT,_HEAD-1,_CYL,WIN_SPECIFY,&do_request);
+hd_out            311 kernel/hd.c      		hd_out(this_request->hd,this_request->nsector,this_request->
+hd_out            323 kernel/hd.c      		hd_out(this_request->hd,this_request->nsector,this_request->
+#+END_EXAMPLE
+に、printk()を追加し、どのようにこれらが呼ばれているのかを調べる
+
+#+BEGIN_EXAMPLE
+diff --git a/kernel/hd.c b/kernel/hd.c
+index cd1ddc5..23c163d 100644
+--- a/kernel/hd.c
++++ b/kernel/hd.c
+@@ -229,6 +229,7 @@ static void reset_controller(void)
+ static void reset_hd(int nr)
+ {
+        reset_controller();
++       printk("reset_hd\n\r");
+        hd_out(nr,_SECT,_SECT,_HEAD-1,_CYL,WIN_SPECIFY,&do_request);
+ }
+ 
+@@ -304,10 +305,12 @@ static void do_request(void)
+        if (sorting)
+                return;
+        if (!this_request) {
++               printk("do_request this_request==0\n\r");
+                do_hd=NULL;
+                return;
+        }
+        if (this_request->cmd == WIN_WRITE) {
++               printk("do_request WRITE\n\r");
+                hd_out(this_request->hd,this_request->nsector,this_request->
+                        sector,this_request->head,this_request->cyl,
+                        this_request->cmd,&write_intr);
+@@ -320,6 +323,7 @@ static void do_request(void)
+                port_write(HD_DATA,this_request->bh->b_data+
+                        512*(this_request->nsector&1),256);
+        } else if (this_request->cmd == WIN_READ) {
++               printk("do_request READ\n\r");
+                hd_out(this_request->hd,this_request->nsector,this_request->
+                        sector,this_request->head,this_request->cyl,
+                        this_request->cmd,&read_intr);
+#+END_EXAMPLE
+差分はこんな感じ。
+
+この時、QEMU上で以下のような結果となった
+#+BEGIN_EXAMPLE
+Loading system ...
+
+do_request READ
+do_request this_request==0
+Partition table ok.
+do_request READ
+do_request this_request==0
+Kernel panic: Unexpected HD interrupt
+#+END_EXAMPLE
+
+- 初期化から何も書かれずにhd_interrupt
+は、容疑者から外れた。
+
+したがって、容疑者は
+「do_request時にthis_request==0でdo_hd=NULLしてから、
+ 一度もdo_hdに0以外の値が書かれることなくhd_interrupt」
+の1点のみ。
+
+
+
+
+
+this_requestを0(NULL)にしているのは誰か？
+
+global -gx this_request から、削っていく
+#+BEGIN_EXAMPLE
+this_request       58 kernel/hd.c      static struct hd_request * this_request = NULL;
+this_request      250 kernel/hd.c               this_request=this_request->next;
+this_request      278 kernel/hd.c       this_request=this_request->next;
+this_request      288 kernel/hd.c       if (--this_request->nsector) {
+this_request      297 kernel/hd.c       this_request=this_request->next;
+this_request      354 kernel/hd.c               this_request=req;
+#+END_EXAMPLE
+
+
+
+** HDなしで動かしてみよう
+HD関連以外でできていることを理解する
+
+*** main以前
+Q. mainはどこから起動している？
+
+> yarakawa@dyna:~/git/linux-0.01-rm-3.5$ global -xg main
+で、不要な行を削除すると、
+#+BEGIN_EXAMPLE
+main               95 boot/head.s       pushl $0                # These are the parameters to main :-)
+main               98 boot/head.s       pushl $L6               # return address for main, if it decides to.
+main               99 boot/head.s       pushl $main
+main              102 boot/head.s       jmp L6                  # main should never return here, but
+#+END_EXAMPLE
+実際にboot/head.sを見に行くと、以下のように書かれている。
+#+BEGIN_SRC as
+.org 0x4000
+after_page_tables:
+	pushl $0		# These are the parameters to main :-)
+	pushl $0
+	pushl $0
+	pushl $L6		# return address for main, if it decides to.
+	pushl $main
+	jmp setup_paging
+L6:
+	jmp L6			# main should never return here, but
+				# just in case, we know what happens.
+#+END_SRC
+setup_pagingには、
+#+BEGIN_SRC as
+/*
+ * Setup_paging
+ *
+ * This routine sets up paging by setting the page bit
+ * in cr0. The page tables are set up, identity-mapping
+ * the first 8MB. The pager assumes that no illegal
+ * addresses are produced (ie >4Mb on a 4Mb machine).
+ *
+ * NOTE! Although all physical memory should be identity
+ * mapped by this routine, only the kernel page functions
+ * use the >1Mb addresses directly. All "normal" functions
+ * use just the lower 1Mb, or the local data space, which
+ * will be mapped to some other place - mm keeps track of
+ * that.
+ *
+ * For those with more memory than 8 Mb - tough luck. I've
+ * not got it, why should you :-) The source is here. Change
+ * it. (Seriously - it shouldn't be too difficult. Mostly
+ * change some constants etc. I left it at 8Mb, as my machine
+ * even cannot be extended past that (ok, but it was cheap :-)
+ * I've tried to show which constants to change by having
+ * some kind of marker at them (search for "8Mb"), but I
+ * won't guarantee that's all :-( )
+ */
+.align 2
+setup_paging:
+	movl $1024*3,%ecx
+	xorl %eax,%eax
+	xorl %edi,%edi			/* pg_dir is at 0x000 */
+	cld;rep;stosl
+	movl $pg0+7,pg_dir		/* set present bit/user r/w */
+	movl $pg1+7,pg_dir+4		/*  --------- " " --------- */
+	movl $pg1+4092,%edi
+	movl $0x7ff007,%eax		/*  8Mb - 4096 + 7 (r/w user,p) */
+	std
+1:	stosl			/* fill pages backwards - more efficient :-) */
+	subl $0x1000,%eax
+	jge 1b
+	xorl %eax,%eax		/* pg_dir is at 0x0000 */
+	movl %eax,%cr3		/* cr3 - page directory start */
+	movl %cr0,%eax
+	orl $0x80000000,%eax
+	movl %eax,%cr0		/* set paging (PG) bit */
+	ret			/* this also flushes prefetch-queue */
+#+END_SRC
+なので、jmp L6は単なる無限ループで、
+pushl $mainすることで、最終的にmain()が実行されるような準備が、
+after_page_tablesまでに整っているということ？
+
+IntelのマニュアルVol.2BのP.154を見ると、
+push(l)は、単にスタック・セグメントに値をプッシュするだけ
+
+
+
+*** main以降

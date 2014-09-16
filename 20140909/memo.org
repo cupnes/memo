@@ -1,0 +1,22 @@
+* linux-0.01-rm の移植
+** Kernel panic: Unexpected HD interrupt
+出させているのは
+kernel/hd.c(235): void unexpected_hd_interrupt(void)
+
+これを呼んでいるのは
+kernel/system_call.s(218): 	movl $unexpected_hd_interrupt,%eax
+のみ
+
+system_call.sで218行目が実行されるのは、
+217行目の
+#+BEGIN_EXAMPLE
+	jne 1f
+#+END_EXAMPLE
+が実行されなかったから
+
+ということは、
+216行目の
+#+BEGIN_EXAMPLE
+	testl %eax,%eax
+#+END_EXAMPLE
+で、%eaxは

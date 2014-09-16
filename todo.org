@@ -112,3 +112,18 @@ if ((unsigned char *)mcb.next == (unsigned char *)&mcb + sizeof(struct mem_contr
 	/* 隣接していない */
 }
 #+END_SRC
+** 日々カーネルを読む習慣をつけるために
+- gitkじゃなくてもgitのログを追えるように
+-- gitkは重い
+-- gitkで「過去Xの深さまで」とかいうオプションはある？
+-- gitコマンドでログを見る方法を
+-- emacs連携
+- GLOBALを極める
+- linuxとlinux-nextの以下の項目くらいはcronとかで自動で走るように
+-- git pull
+-- gtags
+
+** 打鍵数低減の工夫
+- emacs
+- シェル
+-- alias
